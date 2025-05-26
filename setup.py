@@ -12,5 +12,6 @@ setup(
         "psycopg2-binary",
         "pydantic",
         "pydantic-settings",
+        "python-dotenv",
     ],
 ) 

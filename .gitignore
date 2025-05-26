@@ -23,7 +23,7 @@ wheels/
 # Virtual Environment
 .env
 .venv
-env/
+# env/
 venv/
 ENV/
 
@@ -49,5 +49,5 @@ coverage.xml
 .hypothesis/
 
 # Misc
-.env
+# .env
 .env.local 

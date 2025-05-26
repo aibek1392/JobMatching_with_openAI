@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from app.api.endpoints import companies, jobs
+from app.core.config import settings
+from app.api.endpoints import companies, jobs, applications
 
 app = FastAPI(title="Job Board API")
 
@@ -14,9 +14,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(companies.router, prefix="/companies", tags=["companies"])
-app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+# Include routers with API version prefix
+app.include_router(companies.router, prefix=f"{settings.API_V1_STR}/companies", tags=["companies"])
+app.include_router(jobs.router, prefix=f"{settings.API_V1_STR}/jobs", tags=["jobs"])
+app.include_router(applications.router, prefix=f"{settings.API_V1_STR}/applications", tags=["applications"])
 
 @app.get("/")
 def read_root():

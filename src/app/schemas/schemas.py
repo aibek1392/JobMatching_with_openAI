@@ -1,11 +1,12 @@
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, EmailStr
 from typing import Optional, List
+from datetime import datetime
 
 # Company Schemas
 class CompanyBase(BaseModel):
     name: str #required
     industry: Optional[str] = None
-    url: Optional[HttpUrl] = None
+    url: Optional[str] = None
     headcount: Optional[int] = None
     country: Optional[str] = None
     state: Optional[str] = None
@@ -28,10 +29,10 @@ class Company(CompanyBase):
 class JobPostingBase(BaseModel):
     company_id: int
     title: str
-    compensation_min: Optional[float] = None
-    compensation_max: Optional[float] = None
-    location_type: Optional[str] = None
-    employment_type: Optional[str] = None
+    location: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    salary_range: Optional[str] = None
 
 class JobPostingCreate(JobPostingBase):
     pass
@@ -42,6 +43,44 @@ class JobPostingUpdate(JobPostingBase):
 
 class JobPosting(JobPostingBase):
     id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+# Job Description Generation Schemas
+class JobDescriptionRequest(BaseModel):
+    required_tools: List[str]
+
+class JobDescriptionResponse(BaseModel):
+    job_id: int
+    description: str
+    company_name: str
+    job_title: str
+
+# Application Schemas
+class ApplicationBase(BaseModel):
+    job_id: int
+    candidate_id: str
+    name: str
+    email: EmailStr
+    status: str = "Pending"
+
+class ApplicationCreate(ApplicationBase):
+    pass
+
+class ApplicationUpdate(ApplicationBase):
+    job_id: Optional[int] = None
+    candidate_id: Optional[str] = None
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    status: Optional[str] = None
+
+class Application(ApplicationBase):
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True 
