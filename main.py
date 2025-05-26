@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, Path, Depends
+from fastapi import FastAPI, Query, Path, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import create_engine, Column, Integer, String, text
@@ -8,6 +8,8 @@ import os
 from app.api.endpoints import companies
 from datetime import datetime
 import openai
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +40,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 app = FastAPI()
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React app's address
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 # This is our data model - what an application looks like
 class Candidate(BaseModel):
     candidate_id: str 
@@ -66,7 +77,14 @@ def get_all_job_postings(db: Session = Depends(get_db)):
     rows = result.fetchall()
     output = []
     for row in rows:
-        output.append(str(dict(row._mapping)))
+        # Convert the row to a dictionary and handle datetime objects
+        job_dict = dict(row._mapping)
+        # Convert datetime objects to ISO format strings
+        if job_dict.get('created_at'):
+            job_dict['created_at'] = job_dict['created_at'].isoformat()
+        if job_dict.get('updated_at'):
+            job_dict['updated_at'] = job_dict['updated_at'].isoformat()
+        output.append(job_dict)
     return output
 
 @app.get("/jobs/{job_id}")
@@ -82,8 +100,8 @@ def get_job_posting(job_id: int, db: Session = Depends(get_db)):
     
     return dict(job._mapping)
 
-@app.post("/jobs/{job_id}/description")
-def generate_job_description(
+@app.post("/jobs/{job_id}/description/stream")
+async def stream_job_description_endpoint(
     job_id: int,
     request: JobDescriptionRequest,
     db: Session = Depends(get_db)
@@ -96,7 +114,7 @@ def generate_job_description(
     job = result.fetchone()
     
     if not job:
-        return {"error": "Job not found"}
+        raise HTTPException(status_code=404, detail="Job not found")
     
     # Get company details
     company_result = db.execute(
@@ -106,52 +124,58 @@ def generate_job_description(
     company = company_result.fetchone()
     
     if not company:
-        return {"error": "Company not found"}
-    
-    # Prepare the prompt for GPT
-    prompt = f"""Generate a detailed job description for a {job.title} position at {company.name} in {job.location}.
-    Required tools and technologies: {', '.join(request.required_tools)}
-    
-    The description should include:
-    1. A compelling introduction
-    2. Key responsibilities
-    3. Required qualifications
-    4. Preferred qualifications
-    5. Company benefits and culture
-    """
-    
-    try:
-        # Initialize OpenAI client
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        
-        # Generate description using GPT-4
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a professional job description writer."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        description = response.choices[0].message.content
-        
-        # Update the job posting with the generated description
-        db.execute(
-            text('UPDATE "JobPosting" SET description = :description WHERE id = :job_id'),
-            {"description": description, "job_id": job_id}
-        )
-        db.commit()
-        
-        return {
-            "job_id": job_id,
-            "description": description,
-            "generated_at": datetime.utcnow().isoformat() + "Z"
-        }
-        
-    except Exception as e:
-        return {"error": f"Failed to generate description: {str(e)}"}
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    async def generate():
+        try:
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
+            
+            # Prepare the prompt
+            prompt = f"""Generate a detailed job description for a {job.title} position at {company.name} in {job.location}.
+            Required tools and technologies: {', '.join(request.required_tools)}
+            
+            The description should include:
+            1. A compelling introduction
+            2. Key responsibilities
+            3. Required qualifications
+            4. Preferred qualifications
+            5. Company benefits and culture
+            """
+            
+            # Generate description using GPT-4 with streaming
+            stream = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a professional job description writer."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1000,
+                stream=True
+            )
+            
+            full_description = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    full_description += content
+                    yield content
+
+            # Update the job posting with the complete description
+            db.execute(
+                text('UPDATE "JobPosting" SET description = :description WHERE id = :job_id'),
+                {"description": full_description, "job_id": job_id}
+            )
+            db.commit()
+            
+        except Exception as e:
+            yield f"Error: {str(e)}"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream"
+    )
 
 @app.post("/applications")
 def postApplications(candidate: Candidate):
