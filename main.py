@@ -63,16 +63,24 @@ def get_db():
 @app.get("/jobs")
 def get_all_job_postings(db: Session = Depends(get_db)):
     result = db.execute(text('SELECT * FROM "JobPosting"'))
-    
     rows = result.fetchall()
-
-    #format each row as a String
     output = []
     for row in rows:
         output.append(str(dict(row._mapping)))
+    return output
 
-    return output    
+@app.get("/jobs/{job_id}")
+def get_job_posting(job_id: int, db: Session = Depends(get_db)):
+    result = db.execute(
+        text('SELECT * FROM "JobPosting" WHERE id = :job_id'),
+        {"job_id": job_id}
+    )
+    job = result.fetchone()
     
+    if not job:
+        return {"error": "Job not found"}
+    
+    return dict(job._mapping)
 
 @app.post("/jobs/{job_id}/description")
 def generate_job_description(
