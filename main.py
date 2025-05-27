@@ -132,26 +132,25 @@ async def stream_job_description_endpoint(
             client = openai.OpenAI(api_key=OPENAI_API_KEY)
             
             # Prepare the prompt
-            prompt = f"""Generate a detailed job description for a {job.title} position at {company.name} in {job.location}.
-            Required tools and technologies: {', '.join(request.required_tools)}
+            prompt = f"""Write a concise job description for a {job.title} position at {company.name} in {job.location}.
+            Required tools: {', '.join(request.required_tools)}
             
-            The description should include:
-            1. A compelling introduction
+            Include:
+            1. Brief overview
             2. Key responsibilities
-            3. Required qualifications
-            4. Preferred qualifications
-            5. Company benefits and culture
-            """
+            3. Required skills
+            4. Benefits
+            Keep it under 200 words."""
             
             # Generate description using GPT-4 with streaming
             stream = client.chat.completions.create(
                 model="gpt-4",
                 messages=[
-                    {"role": "system", "content": "You are a professional job description writer."},
+                    {"role": "system", "content": "You are a professional job description writer. Be concise and clear."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=1000,
+                max_tokens=500,
                 stream=True
             )
             
