@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, Path, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from sqlalchemy import create_engine, Column, Integer, String, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -10,6 +10,11 @@ from datetime import datetime
 import openai
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import PydanticOutputParser
+from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+import json
 
 # Load environment variables
 load_dotenv()
@@ -56,8 +61,19 @@ class Candidate(BaseModel):
     email: str 
     job_id: str | None = None
 
+# Pydantic models for structured output
+class JobDescriptionComponents(BaseModel):
+    title: str = Field(description="The job title")
+    overview: str = Field(description="A brief 2-3 sentence overview of the role")
+    responsibilities: List[str] = Field(description="4-6 key responsibilities of the role")
+    required_skills: List[str] = Field(description="3-5 required technical skills")
+    qualifications: List[str] = Field(description="2-3 key qualifications")
+    benefits: List[str] = Field(description="2-3 key benefits of the role")
+    company_culture: Optional[str] = Field(description="Description of company culture and work environment")
+
 class JobDescriptionRequest(BaseModel):
     required_tools: List[str]
+    company_culture: Optional[str] = None
 
 # This is our "database" - just a list in memory - cache memory
 applications: List[Candidate] = []
@@ -69,7 +85,65 @@ def get_db():
         yield db
     finally:
         db.close()    
-    
+
+# Initialize LangChain chat model
+def init_chat_model():
+    return ChatOpenAI(
+        model_name="gpt-4",
+        temperature=0.7,
+        max_tokens=500,
+        frequency_penalty=0.1,
+        presence_penalty=0.1
+    )
+
+# Create prompt templates
+SYSTEM_TEMPLATE = """You are a professional job description writer with expertise in technical roles. 
+Generate a structured job description following these guidelines:
+
+1. Structure:
+   - Start with a brief 2-3 sentence overview
+   - List 4-6 key responsibilities
+   - List 3-5 required skills
+   - List 2-3 key qualifications
+   - End with 2-3 key benefits
+   - Include company culture if provided
+
+2. Content Rules:
+   - Be specific about technical requirements
+   - Use clear, professional language
+   - Avoid generic phrases
+   - Focus on measurable skills
+   - Include specific tools and technologies
+
+3. Formatting:
+   - Use clear, concise language
+   - Maintain professional tone
+   - Be specific and actionable
+
+4. Restrictions:
+   - No salary information
+   - No discriminatory language
+   - No vague requirements
+   - No marketing language
+
+{format_instructions}"""
+
+HUMAN_TEMPLATE = """Write a job description for a {job_title} position at {company_name} in {location}.
+
+Required Technical Tools: {required_tools}
+
+Company Culture: {company_culture}
+
+Additional Context:
+- Company: {company_name}
+- Location: {location}
+- Role: {job_title}"""
+
+# Create the prompt template
+def create_prompt_template():
+    system_message_prompt = SystemMessagePromptTemplate.from_template(SYSTEM_TEMPLATE)
+    human_message_prompt = HumanMessagePromptTemplate.from_template(HUMAN_TEMPLATE)
+    return ChatPromptTemplate.from_messages([system_message_prompt, human_message_prompt])
 
 @app.get("/jobs")
 def get_all_job_postings(db: Session = Depends(get_db)):
@@ -101,80 +175,108 @@ def get_job_posting(job_id: int, db: Session = Depends(get_db)):
     return dict(job._mapping)
 
 @app.post("/jobs/{job_id}/description/stream")
-async def stream_job_description_endpoint(
+async def generate_job_description(
     job_id: int,
     request: JobDescriptionRequest,
     db: Session = Depends(get_db)
 ):
-    # Get job details from database
-    result = db.execute(
-        text('SELECT * FROM "JobPosting" WHERE id = :job_id'),
-        {"job_id": job_id}
-    )
-    job = result.fetchone()
-    
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Get company details
-    company_result = db.execute(
-        text('SELECT * FROM "Company" WHERE id = :company_id'),
-        {"company_id": job.company_id}
-    )
-    company = company_result.fetchone()
-    
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
+    try:
+        # Get job details from database
+        result = db.execute(
+            text('SELECT * FROM "JobPosting" WHERE id = :job_id'),
+            {"job_id": job_id}
+        )
+        job = result.fetchone()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Get company details
+        company_result = db.execute(
+            text('SELECT * FROM "Company" WHERE id = :company_id'),
+            {"company_id": job.company_id}
+        )
+        company = company_result.fetchone()
+        
+        if not company:
+            raise HTTPException(status_code=404, detail="Company not found")
 
-    async def generate():
-        try:
-            # Initialize OpenAI client
-            client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            
-            # Prepare the prompt
-            prompt = f"""Write a concise job description for a {job.title} position at {company.name} in {job.location}.
-            Required tools: {', '.join(request.required_tools)}
-            
-            Include:
-            1. Brief overview
-            2. Key responsibilities
-            3. Required skills
-            4. Benefits
-            Keep it under 200 words."""
-            
-            # Generate description using GPT-4 with streaming
-            stream = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a professional job description writer. Be concise and clear."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=500,
-                stream=True
-            )
-            
-            full_description = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_description += content
-                    yield content
+        async def generate():
+            try:
+                # Initialize LangChain components
+                chat_model = init_chat_model()
+                prompt_template = create_prompt_template()
+                output_parser = PydanticOutputParser(pydantic_object=JobDescriptionComponents)
 
-            # Update the job posting with the complete description
-            db.execute(
-                text('UPDATE "JobPosting" SET description = :description WHERE id = :job_id'),
-                {"description": full_description, "job_id": job_id}
-            )
-            db.commit()
-            
-        except Exception as e:
-            yield f"Error: {str(e)}"
+                # Format the prompt
+                formatted_prompt = prompt_template.format_messages(
+                    format_instructions=output_parser.get_format_instructions(),
+                    job_title=job.title,
+                    company_name=company.name,
+                    location=job.location,
+                    required_tools=", ".join(request.required_tools),
+                    company_culture=request.company_culture or "Not specified"
+                )
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream"
-    )
+                # Stream the response
+                async for chunk in chat_model.astream(formatted_prompt):
+                    if chunk.content:
+                        # Send each chunk as it arrives
+                        yield f"data: {json.dumps({'chunk': chunk.content})}\n\n".encode('utf-8')
+
+                # Get the final response
+                response = await chat_model.ainvoke(formatted_prompt)
+                job_description = output_parser.parse(response.content)
+
+                # Send the final complete response
+                yield f"data: {job_description.json()}\n\n".encode('utf-8')
+
+                # Update the job posting with the complete description
+                formatted_description = f"""
+Title: {job_description.title}
+
+Overview:
+{job_description.overview}
+
+Responsibilities:
+{chr(10).join(f"• {resp}" for resp in job_description.responsibilities)}
+
+Required Skills:
+{chr(10).join(f"• {skill}" for skill in job_description.required_skills)}
+
+Qualifications:
+{chr(10).join(f"• {qual}" for qual in job_description.qualifications)}
+
+Benefits:
+{chr(10).join(f"• {benefit}" for benefit in job_description.benefits)}
+
+Company Culture:
+{job_description.company_culture if job_description.company_culture else "Not specified"}
+"""
+
+                # Save to database
+                db.execute(
+                    text('UPDATE "JobPosting" SET description = :description WHERE id = :job_id'),
+                    {"description": formatted_description, "job_id": job_id}
+                )
+                db.commit()
+
+            except Exception as e:
+                error_message = f"data: {json.dumps({'error': str(e)})}\n\n".encode('utf-8')
+                yield error_message
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating job description: {str(e)}")
 
 @app.post("/applications")
 def postApplications(candidate: Candidate):
@@ -248,12 +350,12 @@ def putApplications(
 
 @app.delete("/applications/{candidate_id}")
 def deleteApplication(candidate_id: str):
-    for i, app in enumerate(applications):
+    for app in applications:
         if app.candidate_id == candidate_id:
-            applications.pop(i)
+            applications.remove(app)
             return {
                 "status": "success",
-                "message": f"Application for {candidate_id} has been deleted"
+                "message": f"Application deleted for candidate ID: {candidate_id}"
             }
     return {
         "status": "success",
